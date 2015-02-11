@@ -1,0 +1,213 @@
+\documentclass[a4paper, 12pt, fleqn]{article}
+
+\usepackage{geometry}
+\usepackage{geometry}
+ \geometry{
+ a4paper,
+ total={210mm,297mm},
+ left=23mm,
+ right=23mm,
+ top=30mm,
+ bottom=30mm,
+ }
+
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amsthm}
+
+\usepackage[pdftex]{graphicx}
+
+\usepackage{subcaption}
+
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+
+%%   Document begins here   %%
+
+\newcommand{\btheta}[0]{\boldsymbol{\theta}}
+\begin{document}
+
+ \title{Tensor Factorization for Relation Extraction}
+\author{Marius Cobzarenco}
+\maketitle
+
+
+Matrix factorisation methods have been successfully applied to
+relation extraction tasks. The problem can be formulated in terms of a
+set $\mathbb{E}$ of entities and a set $\mathbb{P}$ of $n$-ary
+predicates where the task is to learn new predicates that may hold
+between the entities. A predicate (or relation, both terms will be
+used interchangeably) is defined as a boolean function $r:\mathbb{E}^n
+\rightarrow \{0, 1\}$. We will consider the case of binary relations,
+and assume a training set that consists of $ N_E \equiv
+\vert\mathbb{E}\vert$ entities, $N_R \equiv \vert\mathbb{P}\vert$
+relations and $N$ tuples
+\begin{align}
+\{(i_n, j_n, k_n, r_n)\}_{n\in\overline{1..N}}
+\end{align}
+which are interpreted as asserting that relation $R_{k_n}$ either
+holds ($r_n = 1$) or does not hold ($r_n = 0$) between entities
+$e_{i_n}$ and $e_{j_n}$.
+\begin{align}
+R_{k_n}(e_{i_n}, e_{j_n}) &= r_n
+\end{align}
+The training tuples have the constraints that for $n\in{1..N}$ all
+$(k_n, i_n, j_n)$ are distinct and
+\begin{align}
+1 \leq i_n \leq N_E, \quad 1 \leq j_n \leq N_E, \quad
+1 \leq k_n \leq N_R,\quad r_n \in \left\{0, 1\right\}
+\end{align}
+Also note that most natural language relations are not symmetric.
+
+\section{Log-Bilinear Model}
+We propose modelling each entity as a real valued vector ${\bf e}_i
+\in \mathbb{R}^D$ and each relation as a matrix ${\bf R}_k \in
+\mathbb{R}^D \times \mathbb{R}^D$. Given entities ${\bf e}_i$ and
+${\bf e}_j$ the probability of a relation $R_k$ being true is modelled
+as
+\begin{align}
+  &p\left(R_k(e_i, e_j) = 1\vert \btheta\right) = \sigma\left({\bf
+      e}'_i{\bf R}_k{\bf e}_j\right), &\sigma(x) \equiv \left(1 +
+    \exp(-x)\right)^{-1}
+\end{align}
+\noindent with $\btheta \equiv \{{\bf e}_{k=\overline{1..N_E}}, {\bf
+  R}_{k=\overline{1..N_R}}\}$. The probability of a observing a
+particular dataset under the i.i.d. assumption is
+\begin{align}
+  \label{eqn:prob_dataset}
+  p\left(\left\{R_{k_n}(e_{i_n}, e_{j_n})=r_n\right\}\vert\{(i_n, j_n, k_n,
+    r_n)\}_{n\in\overline{1..N}}, \btheta\right)&  \nonumber \\
+  = \prod_{n=1}^{N}\left(1 - \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf
+     e}_{j_n})\right)&^{1 - r_n}\sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf
+      e}_{j_n})^{r_n}
+\end{align}
+The normalised log-likelihood is given by
+\begin{align}
+  \label{eqn:loglike}
+  l(\btheta) = \frac{1}{N}\sum_{n=1}^{N}& (1 - r_n)
+\log \left(1 - \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})\right)
++ r_n \log \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})
+\end{align}
+\noindent The objective function is the $L_2$ regularised log-likelihood
+\begin{align}
+  \label{eqn:objective}
+  L(\btheta) = l(\btheta) +  \frac{\gamma}{DN_E+ D^2N_R} \|\btheta\|^2
+\end{align}
+\noindent $\|\btheta\|^2$ is defined as the sum of the norms squared of
+all ${\bf e}_{k=\overline{1..N_E}}$ and ${\bf
+  R}_{k=\overline{1..N_R}}$. $L$'s partial derivatives
+w.r.t. a relation ${\bf R}_k$ can be computed as
+\begin{align}
+  \label{eqn:objective}
+  \frac{\partial L}{\partial {\bf R}_k} &=
+  \frac{1}{N}\sum_{n=1}^{N}\delta_{k,k_n}\left[(r_n - 1)\sigma({\bf
+      e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
+        e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) \right)\right]
+  {\bf e}_{i_n}{\bf e}'_{j_n}+ 2\hat\gamma{\bf R}_k
+\end{align}
+Similarly, the partial derivative w.r.t. to an entity  ${\bf R}_k$ is
+\begin{align}
+  \frac{\partial L}{\partial {\bf e}_i} =
+  \frac{1}{N}\sum_{n=1}^{N}&\left[(r_n - 1)\sigma({\bf
+      e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
+        e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) \right)\right] \nonumber \\
+  &\times \left( \delta_{i,i_n}{\bf R}_{k_n}
+    {\bf e}_{j_n} + \delta_{i,j_n}{\bf R}'_{k_n} {\bf
+      e}_{i_n}\right) + 2\hat\gamma {\bf e}_i
+\end{align}
+Where $\hat\gamma$ was defined to be
+\begin{align}
+\hat\gamma \equiv \frac{\gamma}{DN_E+ D^2N_R}
+\end{align}
+
+% In particular, we are building on \cite{riedel13relation}
+
+
+% \section{Background}
+
+% Noise-contrastive estimation (NCE) is a recent approximate point-wise
+% estimation principle for probabilistic models first introduced by
+% Hyv{\"a}rinen et al in \cite{gutmann2010noise}. In particular, the
+% method can be applied to unnormalized probabilistic models, allowing
+% to jointly optimise the normalisation constant and the parameters of
+% the model simultaneously. This is achieved through introducing an
+% alternative to the maximum likelihood estimator (MLE) and analysing
+% its asymptotic properties in large samples. In contrast to ML
+% estimation, the normalisation constant can be treated as any other
+% parameter. The underlying optimisation problem is unconstrained and
+% yields a normalised model. As the contribution of the theory is a new
+% estimator shown to have desirable asymptotic properties under repeated
+% sampling, the analysis of its statistical properties is necessarily
+% frequentist.
+
+% \noindent Let $X = \{ {\bf x}_1, ..., {\bf x}_N \}$ be a sample
+% dataset with ${\bf x}_i \in \mathcal{R}^D, \forall i \in
+% \overline{1..N}$. The data is assumed to come from an unknown sampling
+% distribution $p_d$ and it is modelled by a family of probability
+% distributions $\mathcal{F} \equiv {p_m(\cdot\vert {\boldsymbol
+%     \theta})}$ parameterized by ${\bf \theta}$. Moreover, it is
+% assumed $\mathcal{F}$ is flexible enough: there exists some parameter
+% ${\boldsymbol \theta}^*$ such that $p_d(\cdot) =
+% p_m(\cdot\vert{\boldsymbol \theta^*})$. In this context, the learning
+% problem is finding $\boldsymbol \theta^*$ given the training dataset
+% $X$.
+
+% \noindent The theory of noise-contrastive estimation is motivated by
+% characterising the properties of $X$ in relation to a generated
+% reference \emph{noise} dataset $Y$ with known distribution $p_n$. The
+% probability densities of the noise and the training data are related
+% by the ratio $p_d/p_n$. The comparison between the two datasets is
+% achieved by training a logistic regression classifier to discriminate
+% between noise and the dataset $X$. Assume $M$ noise samples are
+% generated, such that $Y = \{ {\bf y}_1, ..., {\bf y}_M \}$ and let $Z
+% \equiv X \cup Y = \{ {\bf z}_1, ..., {\bf z}_{N + M} \}$. For each
+% datapoint ${\bf z}_i$, we assign a class label $c_i = 1$ iff ${\bf
+%   z}_i \in X$ and $c_i = 0$ iff ${\bf z}_i \in Y$. As the sampling
+% distribution $p_d$ is unknown, $p({\bf z}\vert c=1)$ is taken to be
+% $p_m({\bf z}\vert {\boldsymbol \theta})$ and thus:
+% \begin{align*}
+%   p({\bf z} \vert c = 0, {\boldsymbol \theta}) &= p_n({\bf z})
+%   &p(c = 0) = \frac{M}{M + N}\\
+%   p({\bf z} \vert c = 1, {\boldsymbol \theta}) &= p_m({\bf z}\vert
+%   {\boldsymbol \theta})
+%   &p(c = 1) = \frac{N}{M + N}
+% \end{align*}
+% \noindent Using Bayes theorem and letting $\sigma(x) \equiv 1 / (1 +
+% \exp(-x))$ denote the logistic function, the posterior class
+% probability for a noise sample can be written as
+% \begin{align}
+%   p(c = 0 \vert {\bf z}, {\boldsymbol \theta}) &= \frac{p( {\bf z}
+%     \vert c = 0, {\boldsymbol \theta})p(c = 0)} {p( {\bf z} \vert c =
+%     0, {\boldsymbol \theta})p(c = 0) + p( {\bf z}
+%     \vert c = 1, {\boldsymbol \theta})p(c = 1)} \notag \\
+%   &= \frac{Mp_n({\bf z})}{Mp_n({\bf z}) + Np_m({\bf z}\vert
+%     {\boldsymbol \theta})} = \frac{\alpha p_n({\bf z})}{\alpha
+%     p_n({\bf z})
+%     + p_m({\bf z}\vert {\boldsymbol \theta})} \notag \\
+%   &= 1 - \sigma\left(\log \frac{p_m({\bf z}\vert {\boldsymbol
+%         \theta})}{\alpha p_n({\bf z})} \right)
+% \end{align}
+% Where $\alpha \equiv M / N$ is the ratio between the number of noise
+% samples and the number of training datapoints. In the last line above
+% the relation $\sigma(-x) = 1 - \sigma(x)$ was used. Similarly, the
+% posterior class probability for a training datapoint is
+% \begin{align}
+%   p(c = 1 \vert {\bf z}, {\boldsymbol \theta}) = \frac{p_m({\bf
+%       z}\vert {\boldsymbol \theta})}{\alpha p_n({\bf z}) + p_m({\bf
+%       z}\vert {\boldsymbol \theta})} = \sigma\left(\log \frac{p_m({\bf
+%         z}\vert {\boldsymbol \theta})}{\alpha p_n({\bf z})} \right)
+% \end{align}
+% \noindent The quantities can be written more succinctly by introducing
+% a function $h$
+% \begin{align}
+%   h({\bf z}, \alpha, {\boldsymbol \theta}) \equiv \sigma\left(\log
+%     \frac{p_m({\bf z}\vert {\boldsymbol \theta})}{\alpha p_n({\bf z})}
+%   \right)
+% \end{align}
+% \noindent such that
+% \begin{align}
+% &p(c = 0 \vert {\bf z}, {\boldsymbol \theta}) = 1 - h({\bf z}, \alpha, {\boldsymbol \theta})
+% &p(c = 1 \vert {\bf z}, {\boldsymbol \theta}) = h({\bf z}, \alpha, {\boldsymbol \theta})
+% \end{align}
+
+\end{document}

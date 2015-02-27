@@ -52,7 +52,7 @@ $e_{i_n}$ and $e_{j_n}$.
 R_{k_n}(e_{i_n}, e_{j_n}) &= r_n
 \end{align}
 The training tuples have the constraints that for $n\in{1..N}$ all
-$(k_n, i_n, j_n)$ are distinct and
+$(i_n, j_n, k_n)$ are distinct and
 \begin{align}
 1 \leq i_n \leq N_E, \quad 1 \leq j_n \leq N_E, \quad
 1 \leq k_n \leq N_R,\quad r_n \in \left\{0, 1\right\}
@@ -95,7 +95,7 @@ The normalised log-likelihood is given by
 \end{align}
 \noindent $\|\btheta\|^2$ is defined as the sum of the norms squared of
 all ${\bf e}_{k=\overline{1..N_E}}$ and ${\bf
-  R}_{k=\overline{1..N_R}}$. $L$'s partial derivatives
+  R}_{k=\overline{1..N_R}}$. $L$'s partial derivative
 w.r.t. a relation ${\bf R}_k$ can be computed as
 \begin{align}
   \label{eqn:objective}
@@ -105,12 +105,12 @@ w.r.t. a relation ${\bf R}_k$ can be computed as
         e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) \right)\right]
   {\bf e}_{i_n}{\bf e}'_{j_n}+ 2\hat\gamma{\bf R}_k
 \end{align}
-Similarly, the partial derivative w.r.t. to an entity  ${\bf R}_k$ is
+Similarly, the partial derivative w.r.t. to an entity  ${\bf e}_i$ is
 \begin{align}
   \frac{\partial L}{\partial {\bf e}_i} =
   \frac{1}{N}\sum_{n=1}^{N}&\left[(r_n - 1)\sigma({\bf
-      e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
-        e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) \right)\right] \nonumber \\
+      e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
+        e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n}) \right)\right] \nonumber \\
   &\times \left( \delta_{i,i_n}{\bf R}_{k_n}
     {\bf e}_{j_n} + \delta_{i,j_n}{\bf R}'_{k_n} {\bf
       e}_{i_n}\right) + 2\hat\gamma {\bf e}_i

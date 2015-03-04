@@ -1,4 +1,4 @@
-\documentclass[a4paper, 12pt, fleqn]{article}
+\documentclass[a4paper, 11pt, fleqn]{article}
 
 \usepackage{geometry}
 \usepackage{geometry}
@@ -31,19 +31,25 @@
 \author{Marius Cobzarenco}
 \maketitle
 
+\section{Introduction}
+% Matrix factorisation methods have been successfully applied to
+% relation extraction tasks.
+The problem of relation extraction can be formulated as a supervsied
+learning problem where given a set $\mathbb{E}$ of entities/objects
+and a set $\mathbb{P}$ of $n$-ary predicates the task is to learn new
+predicates that may hold between the entities. A predicate (or
+relation, both terms will be used interchangeably) is defined as a
+boolean function $r:\mathbb{E}^n \rightarrow \{0, 1\}$.
 
-Matrix factorisation methods have been successfully applied to
-relation extraction tasks. The problem can be formulated in terms of a
-set $\mathbb{E}$ of entities and a set $\mathbb{P}$ of $n$-ary
-predicates where the task is to learn new predicates that may hold
-between the entities. A predicate (or relation, both terms will be
-used interchangeably) is defined as a boolean function $r:\mathbb{E}^n
-\rightarrow \{0, 1\}$. We will consider the case of binary relations,
-and assume a training set that consists of $ N_E \equiv
-\vert\mathbb{E}\vert$ entities, $N_R \equiv \vert\mathbb{P}\vert$
-relations and $N$ tuples
+\[examples of relations\]
+
+For ease of comparison with previous work, we will focus on the case
+of binary relations. However, all models discussed below are trivially
+applicable to predicates of arbitrary arrity. Let us assume a training
+set that consists of $ N_E \equiv \vert\mathbb{E}\vert$ entities, $N_R
+\equiv \vert\mathbb{P}\vert$ relations and $N$ tuples
 \begin{align}
-\{(i_n, j_n, k_n, r_n)\}_{n\in\overline{1..N}}
+X \equiv \{(i_n, j_n, k_n, r_n)\}_{n\in\overline{1..N}}
 \end{align}
 which are interpreted as asserting that relation $R_{k_n}$ either
 holds ($r_n = 1$) or does not hold ($r_n = 0$) between entities
@@ -57,69 +63,102 @@ $(i_n, j_n, k_n)$ are distinct and
 1 \leq i_n \leq N_E, \quad 1 \leq j_n \leq N_E, \quad
 1 \leq k_n \leq N_R,\quad r_n \in \left\{0, 1\right\}
 \end{align}
-Also note that most natural language relations are not symmetric.
+Note that most natural language relations are not symmetric.
 
-\section{Log-Bilinear Model}
-We propose modelling each entity as a real valued vector ${\bf e}_i
-\in \mathbb{R}^D$ and each relation as a matrix ${\bf R}_k \in
-\mathbb{R}^D \times \mathbb{R}^D$. Given entities ${\bf e}_i$ and
-${\bf e}_j$ the probability of a relation $R_k$ being true is modelled
-as
+\section{Tensor Decomposition}
+
+\subsection{Log-Bilinear Model}
+We propose modelling each entity $e_i$ as a real valued vector ${\bf
+e}_i \in \mathbb{R}^D$ and each relation $R_k$ as a matrix ${\bf R}_k
+\in \mathbb{R}^{D \times D}$. Given entities $e_i$ and $e_j$
+the probability of a relation $R_k$ being true is modelled as
 \begin{align}
   &p\left(R_k(e_i, e_j) = 1\vert \btheta\right) = \sigma\left({\bf
-      e}'_i{\bf R}_k{\bf e}_j\right), &\sigma(x) \equiv \left(1 +
-    \exp(-x)\right)^{-1}
+      e}'_i{\bf R}_k{\bf e}_j\right) \equiv \sigma\left({\bf
+      e}'_i{\bf U}_k{\bf V}_k{\bf e}_j\right),
+&\sigma(x) \equiv \left(1 + \exp(-x)\right)^{-1}
 \end{align}
-\noindent with $\btheta \equiv \{{\bf e}_{k=\overline{1..N_E}}, {\bf
-  R}_{k=\overline{1..N_R}}\}$. The probability of a observing a
-particular dataset under the i.i.d. assumption is
+\noindent To make the embeddings interpretable and reguralize the
+objective, ${\bf R}_k$ was constrained to be low rank ${\bf R}_k
+\equiv {\bf U}_k{\bf V}_k$ for
+some $ {\bf U}_k \in \mathbb{R}^{D
+  \times \rho}$ and $ {\bf V}_k \in \mathbb{R}^{\rho \times D}$ with
+$\rho \equiv \text{rank}({\bf R}_k) < D$. The parameters $\btheta$ are
+the embeddings for entities and relations
+\begin{align}
+\btheta \equiv \{{\bf e}_i \vert i \in \overline{1..N_E}\} \cup
+ \{{\bf U}_k, {\bf V}_k \vert k \in \overline{1..N_R}\}
+\end{align}
+An independent Gaussian prior was placed on the coefficients of the
+embeddings
+\begin{align}
+\forall i \in \overline{1..N_E}.\;\; {\bf e}_i \sim \mathcal{N}({\bf 0},
+\sigma^2); \quad \forall k \in \overline{1..N_R}.\;\; {\bf U}_k[:],
+{\bf V}_k[:] \sim
+\mathcal{N}({\bf 0}, \sigma^2)
+\end{align}
+Given a dataset assumed assumed to be i.i.d., the posterior
+distribution over $\btheta$ up to the normalisation constant is
 \begin{align}
   \label{eqn:prob_dataset}
-  p\left(\left\{R_{k_n}(e_{i_n}, e_{j_n})=r_n\right\}\vert\{(i_n, j_n, k_n,
-    r_n)\}_{n\in\overline{1..N}}, \btheta\right)&  \nonumber \\
-  = \prod_{n=1}^{N}\left(1 - \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf
-     e}_{j_n})\right)&^{1 - r_n}\sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf
-      e}_{j_n})^{r_n}
+  p(\btheta\vert X) &\propto p(X\vert \btheta)p(\btheta) \nonumber \\
+&= p\left(\left\{R_{k_n}(e_{i_n}, e_{j_n})=r_n\right\}_{n\in\overline{1..N}}\vert
+    \btheta\right) p(\btheta)\nonumber \\
+  &= \prod_{n=1}^{N}\left(1 - \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf
+     e}_{j_n})\right)^{1 - r_n}\sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf
+      e}_{j_n})^{r_n} \prod_{i=1}^{N_E} (2\pi\sigma^2)^{-\frac{D}{2}}
+    \exp\left(-\frac{{\bf e}_i'{\bf e}_i}{2\sigma^2}\right) \nonumber \\
+&\times \prod_{k=1}^{N_R} (2\pi\sigma^2)^{-D\rho}
+    \exp\left(-\frac{\text{Tr}\left({\bf U}_k'{\bf U}_k + {\bf V}_k{\bf V}_k'\right)}{2\sigma^2}\right)
 \end{align}
-The normalised log-likelihood is given by
+We propose fitting this model by finding the maximum a posteriori
+(MAP) estimate $\btheta^* \equiv
+\operatorname{argmax} L(\btheta)$,  with $L(\btheta)
+\equiv \log p(X\vert \btheta)p(\btheta)$
 \begin{align}
   \label{eqn:loglike}
-  l(\btheta) = \frac{1}{N}\sum_{n=1}^{N}& (1 - r_n)
-\log \left(1 - \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})\right)
-+ r_n \log \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})
+  L(\btheta) &= \sum_{n=1}^{N}\left[ (1 - r_n) \log \left(1 -
+    \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})\right) + r_n \log
+  \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})\right] \nonumber \\
+  &\quad - \frac{1}{2\sigma^2}\left[ \sum_{i=1}^{N_E} {\bf e}_i'{\bf e}_i
+  +\sum_{k=1}^{N_R}
+  \text{Tr}\left({\bf U}_k'{\bf U}_k + {\bf V}_k{\bf V}_k'\right)\right]
+  - \frac{DN_E + 2D\rho N_R}{2}\log(2\pi\sigma^2)
 \end{align}
-\noindent The objective function is the $L_2$ regularised log-likelihood
+The first term in the first summation in $L(\btheta)$ can be rewritten as
+\begin{align}
+(1 - r_n) \log \left(1 -
+    \sigma({\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})\right) =
+  (r_n - 1)\left( {\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n} +
+  \log(1 + \exp(-{\bf e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n})) \right)
+\end{align}
+This helps with numerical stability when the sigmoid would otherwise
+saturate. The function $log(1 + x)$ is often implemtened in numerical
+packages as \texttt{log1p} such that it is accurate for small $x$
+where $1 + x = 1$ in floating point arithmetic. $L$'s partial
+derivatives w.r.t. $\btheta$ can be computed as
 \begin{align}
   \label{eqn:objective}
-  L(\btheta) = l(\btheta) +  \frac{\gamma}{DN_E+ D^2N_R} \|\btheta\|^2
-\end{align}
-\noindent $\|\btheta\|^2$ is defined as the sum of the norms squared of
-all ${\bf e}_{k=\overline{1..N_E}}$ and ${\bf
-  R}_{k=\overline{1..N_R}}$. $L$'s partial derivative
-w.r.t. a relation ${\bf R}_k$ can be computed as
-\begin{align}
-  \label{eqn:objective}
-  \frac{\partial L}{\partial {\bf R}_k} &=
-  \frac{1}{N}\sum_{n=1}^{N}\delta_{k,k_n}\left[(r_n - 1)\sigma({\bf
+  \frac{\partial L}{\partial {\bf U}_k} &=
+  \sum_{n=1}^{N}\delta_{k,k_n}\left[(r_n - 1)\sigma({\bf
       e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
         e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) \right)\right]
-  {\bf e}_{i_n}{\bf e}'_{j_n}+ 2\hat\gamma{\bf R}_k
-\end{align}
-Similarly, the partial derivative w.r.t. to an entity  ${\bf e}_i$ is
-\begin{align}
-  \frac{\partial L}{\partial {\bf e}_i} =
-  \frac{1}{N}\sum_{n=1}^{N}&\left[(r_n - 1)\sigma({\bf
+  {\bf e}_{i_n}{\bf e}'_{j_n}{\bf V}'_k- \frac{1}{\sigma^{2}}{\bf U}_k \\
+  \frac{\partial L}{\partial {\bf V}_k} &=
+  \sum_{n=1}^{N}\delta_{k,k_n}\left[(r_n - 1)\sigma({\bf
+      e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
+        e}'_{i_n}{\bf R}_{k}{\bf e}_{j_n}) \right)\right]
+  {\bf U}'_k{\bf e}_{i_n}{\bf e}'_{j_n} - \frac{1}{\sigma^{2}}{\bf V}_k \\
+  \frac{\partial L}{\partial {\bf e}_i} &=
+  \sum_{n=1}^{N}\left[(r_n - 1)\sigma({\bf
       e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n}) + r_n \left( 1 - \sigma({\bf
-        e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n}) \right)\right] \nonumber \\
-  &\times \left( \delta_{i,i_n}{\bf R}_{k_n}
+        e}'_{i_n}{\bf R}_{k_n}{\bf e}_{j_n}) \right)\right] \left( \delta_{i,i_n}{\bf R}_{k_n}
     {\bf e}_{j_n} + \delta_{i,j_n}{\bf R}'_{k_n} {\bf
-      e}_{i_n}\right) + 2\hat\gamma {\bf e}_i
-\end{align}
-Where $\hat\gamma$ was defined to be
-\begin{align}
-\hat\gamma \equiv \frac{\gamma}{DN_E+ D^2N_R}
+      e}_{i_n}\right)\nonumber \\
+  &\qquad - \frac{1}{\sigma^2} {\bf e}_i
 \end{align}
 
+\section{Bayesian Personalised Ranking}
 % In particular, we are building on \cite{riedel13relation}
 
 

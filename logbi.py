@@ -5,12 +5,13 @@ import cPickle as pickle
 import sys
 import unittest
 from collections import namedtuple
+from itertools import cycle, islice
 from random import shuffle
 
 import numpy as np
 import pandas as pd
-from numpy import array, concatenate, dot, eye, log, log1p, outer, zeros, \
-    r_, c_, pi, mean, cov, exp
+from numpy import array, concatenate, dot, eye, inf, log, log1p, outer, \
+    r_, c_, pi, mean, cov, einsum, exp, zeros, zeros_like
 from numpy.random import rand, randn
 from numpy.linalg import cholesky, det, inv
 from scipy import optimize
@@ -22,6 +23,7 @@ DEFAULT_MAXNUMLINESEARCH = 150
 sp_minimize = optimize.minimize
 sigmoid = lambda u: 1.0 / (1.0 + exp(-u))
 # sigmoid = lambda u: (1.0 + u / np.sqrt(1 + u * u)) / 2
+
 LogBilinearParams = namedtuple('LogBilinearParams', ['e', 'R'])
 
 # Codes the assertion R_k(e_i, e_j) = r
@@ -38,30 +40,60 @@ def split_train_test(xs, test_fraction):
     split_point = int(len(xs) * (1 - test_fraction))
     return TrainTestSplit(xs[:split_point], xs[split_point:])
 
+
+class RelationParams(object):
+    def __init__(self, U, V):
+        assert U.shape == V.T.shape
+        self.U = U
+        self.V = V
+
+    def __getitem__(self, i):
+        if i == 0:
+            return self.U
+        elif i == 1:
+            return self.V
+        else:
+            raise IndexError()
+
+    def __repr__(self):
+        return "RelationParams({}, {})".format(self.U, self.V)
+
+
 def params_to_vec(params):
-    D = params.e[0].shape[0]
     NE = len(params.e)
     NR = len(params.R)
+    D, rho = params.R[0].U.shape
 
-    theta = np.empty(D * NE + D * D * NR)
+    theta = np.empty(D * NE + 2 * D * rho * NR)
     for i in xrange(NE):
         theta[D * i:D * (i + 1)] = params.e[i].reshape((-1,))
+
+    copy_index = D*NE;
     for k in xrange(NR):
-        theta[D*NE + D*D*k:D*NE + D*D*(k + 1)] = params.R[k].reshape((-1,))
+        theta[copy_index:copy_index + D * rho] = params.R[k].U.reshape((-1,))
+        copy_index += D * rho;
+        theta[copy_index:copy_index + D * rho] = params.R[k].V.reshape((-1,))
+        copy_index += D * rho;
+    assert copy_index == len(theta)
     return theta
 
 
-def vec_to_params(D, NE, NR, theta):
+def vec_to_params(D, NE, NR, rho, theta):
     e, R = [], []
     for i in xrange(NE):
         e.append(theta[D * i:D * (i + 1)].reshape((D, 1)))
+    copy_index = D * NE;
     for k in xrange(NR):
-        R.append(theta[D*NE + D*D*k:D*NE + D*D*(k + 1)].reshape(D, D))
+        U = theta[copy_index:copy_index + D * rho].reshape(D, rho)
+        copy_index += D * rho
+        V = theta[copy_index:copy_index + D * rho].reshape(rho, D)
+        copy_index += D * rho
+        R.append(RelationParams(U, V))
     return LogBilinearParams(e, R)
 
 
 def numerical_grad(f, x0):
-    EPS = 1e-7
+    EPS = 1e-12
     grad = np.empty(len(x0))
     x_minus = x0
     x_plus = np.array(x0)
@@ -117,73 +149,86 @@ def csv_to_rels(path):
 
 
 def l2_norm2(x):
-    return np.sum(x[:] ** 2)
+    return np.sum(x.flatten() ** 2)
 
 
 def compute_accuracy(predictions, ground, threshold=0.5):
+    predictions = (predictions > threshold) * 1
     acc = map(lambda x: x[0].r == x[1] , zip(ground, predictions))
     return np.sum(acc) / float(len(acc))
 
 
 class LogBilinear(object):
-    def __init__(self, D, NE, NR, sigma=1):
+    def __init__(self, D, NE, NR, rho, sigma=1):
         e, R = [], []
-        for _ in xrange(NR):
-            R.append(sigma * randn(D, D))
+        init_vals = lambda m, n: 2 * sigma * (rand(m, n) - 0.5)
         for _ in xrange(NE):
-            e.append(sigma * randn(D, 1))
-
+            e.append(init_vals(D, 1))
+        for _ in xrange(NR):
+            U = sigma * init_vals(D, rho)
+            V = sigma * init_vals(rho, D)
+            R.append(RelationParams(U, V))
         self.params = LogBilinearParams(e, R)
 
     def fit(self, dataset, gamma=0):
         cls = self.__class__
-        params = self.params
-        D, NE, NR = params.e[0].shape[0], len(params.e), len(params.R)
-        # train_rev = map(lambda r: RelationInstance(r.j, r.i, r.k, 1 - r.r), train_set)
-        # train_set.extend(train_rev)
-        # cross_rev = map(lambda r: RelationInstance(r.j, r.i, r.k, 1 - r.r), cross_set)
-        # cross_set.extend(cross_rev)
+        D, rho = self.params.R[0].U.shape
+        NE, NR = len(self.params.e), len(self.params.R)
         valid_len = len(dataset.valid_rels)
         n_ones = sum(map(lambda x: x.r == 1, dataset.valid_rels)) / float(valid_len)
-        print("Training model with {} datapoints ({} held out for validation with {}% =1)"
-              .format(len(dataset.train_rels), valid_len, n_ones))
+        print(("Training model with {} datapoints ({} held out for validation " +
+              "with {}% =1)").format(len(dataset.train_rels), valid_len, n_ones))
 
-        def obj(x):
-            params = vec_to_params(D, NE, NR, x)
-            preds = cls._p(params.e, params.R, dataset.valid_rels) > 0.5
-            train_nll = -cls._loglik(params.e, params.R, gamma, dataset.train_rels)
-            train_acc = compute_accuracy(preds, dataset.train_rels)
+        def obj(rels, x):
+            params = vec_to_params(D, NE, NR, rho, x)
+            train_nll = -cls._loglik(params.e, params.R, gamma, rels)
+            train_acc = compute_accuracy(cls._p(params.e, params.R, rels), rels)
             valid_nll = -cls._loglik(params.e, params.R, gamma, dataset.valid_rels)
-            valid_acc = compute_accuracy(preds, dataset.valid_rels)
+            valid_acc = compute_accuracy(cls._p(params.e, params.R, dataset.valid_rels),
+                                         dataset.valid_rels)
             print("valid_nll = {} / valid_acc = {} / train_nll = {} / "
                   "train_acc = {}".format(
-                      valid_nll, valid_acc, train_nll, train_acc))
+                      valid_nll / len(dataset.valid_rels), valid_acc,
+                      train_nll / len(rels), train_acc))
             return train_nll
 
-        def grad(x):
-            params = vec_to_params(D, NE, NR, x)
-            return -1.0 * params_to_vec(
-                cls._dloglik(params.e, params.R, gamma, dataset.train_rels))
+        def grad(rels, x, compute_du, compute_dv):
+            params = vec_to_params(D, NE, NR, rho, x)
+            train_nll = -cls._loglik(params.e, params.R, gamma, rels)
+            train_acc = compute_accuracy(cls._p(params.e, params.R, batch), rels)
+            print("Objective: {} / Accuracy: {}".format(train_nll, train_acc))
+            return -params_to_vec(
+                cls._dloglik(params.e, params.R, gamma, rels, compute_du, compute_dv))
 
-        theta = params_to_vec(params)
+        theta = params_to_vec(self.params)
         print("Number of model parameters: {}".format(len(theta)))
 
-        # theta_update = zeros(len(theta))
-        # alpha, mu = 2, 0.8
-        # N_ITER = 1000
-        # for iter in xrange(N_ITER):
-        #     probe = theta + theta_update
-        #     theta_update = mu * theta_update - alpha * grad(probe)
-        #     theta +=  theta_update
-        #     print("Objective: {} (alpha={})".format(obj(theta), alpha))
-        # theta_star = theta
+        theta_update = zeros(len(theta))
+        alpha, mu = 0.001, 0.2
+        N_ITER = 100
+        batch_size = 6000
+        train_rels = dataset.train_rels
+        shuffle(train_rels)
+        batches = cycle(train_rels)
+        for i in xrange(N_ITER):
+            batch = list(islice(batches, batch_size))
+            print("Loaded batch {} ({})".format(i, len(batch)))
+            probe = theta + theta_update
+            theta_update = mu * theta_update - alpha * grad(batch, probe, True, False)
+            theta += theta_update
+            probe = theta + theta_update
+            theta_update = mu * theta_update - alpha * grad(batch, probe, False, True)
+            theta += theta_update
+            if (i + 1) % 50 == 0:
+                print("{}".format(obj(batch, theta)))
+        theta_star = theta
 
-        result = minimize(obj, theta, method='L-BFGS-B', jac=grad,
-                          options={'disp': True, 'maxiter': 200,
-                                   'ftol': 0, 'gtol': 1e-8})
-        theta_star = result.x
+        # result = minimize(obj, theta, method='L-BFGS-B', jac=grad,
+        #                   options={'disp': True, 'maxiter': 200,
+        #                            'ftol': 0, 'gtol': 1e-8})
+        # theta_star = result.x
 
-        params = vec_to_params(D, NE, NR, theta_star)
+        params = vec_to_params(D, NE, NR, rho, theta_star)
         preds = cls._p(params.e, params.R, dataset.valid_rels) > 0.5
         acc = map(lambda x: x[0].r == x[1] , zip(dataset.valid_rels, preds))
         acc = np.sum(acc) / len(acc)
@@ -205,8 +250,10 @@ class LogBilinear(object):
 
     @staticmethod
     def _p(e, R, rels):
-        return array(
-            map(lambda r: sigmoid(e[r.i].T.dot(R[r.k]).dot(e[r.j])), rels))
+        p_one = lambda rel: sigmoid(
+            np.einsum('ij,il,lk,kj->', # e'_i * U_k * V_k * e_j
+                      e[rel.i], R[rel.k].U, R[rel.k].V, e[rel.j]).flatten()[0])
+        return array(map(p_one, rels))
 
     def loglik(self, gamma, rels):
         return self.__class__._loglik(
@@ -214,47 +261,55 @@ class LogBilinear(object):
 
     @staticmethod
     def _loglik(e, R, gamma, rels):
-        D, NE, NR = e[0].shape[0], len(e), len(R)
+        D, rho = R[0].U.shape
+        NE, NR =  len(e), len(R)
         loglik = 0
         for rel in rels:
-            corr = np.einsum('ij,ik,kj->', # e'_i * R_k * e_j
-                             e[rel.i], R[rel.k], e[rel.j])
+            corr = np.einsum('ij,il,lk,kj->', # e'_i * U_k * V_k * e_j
+                             e[rel.i], R[rel.k].U, R[rel.k].V, e[rel.j])
             scorr = sigmoid(corr)
             assert rel.r == 1 or rel.r == 0
             if (scorr == 1.0 and rel.r == 1) or (scorr == 0.0 and rel.r == 0):
                 continue
+            # loglik += (1 - rel.r) * log(1 - scorr) + rel.r * log(scorr)
             loglik += (rel.r - 1) * (corr + log1p(exp(-corr))) + \
                       rel.r * log(scorr)
             if np.isnan(loglik):
                 import pdb
                 pdb.set_trace()
             assert not np.isnan(loglik)
-        loglik /= len(rels)
+        assert loglik <= 0
+        # loglik /= len(rels)
         if gamma > 0:
-            reg = np.sum(map(l2_norm2, R)) + np.sum(map(l2_norm2, e))
-            loglik -= gamma / (D * NE + D * D * NR) * reg
+            reg = np.sum(map(lambda r: l2_norm2(r.U) + l2_norm2(r.V), R)) + \
+                  np.sum(map(l2_norm2, e))
+            loglik -= reg * gamma / 2
+            #loglik -= log(2 * pi * gamma) * (D*NE + 2*D*rho*NR) / 2
         assert isinstance(loglik, np.float)
         return loglik
 
     @staticmethod
-    def _dloglik(e, R, gamma, rels):
+    def _dloglik(e, R, gamma, rels, compute_du=True, compute_dv=True):
         D, NE, NR = e[0].shape[0], len(e), len(R)
         N = len(rels)
         de, dR = [], []
-        gamma_hat = gamma / (D * NE + D * D * NR)
         for i in xrange(NE):
-            de.append(-2 * gamma_hat * e[i])
+            de.append(-e[i] * gamma)
         for k in xrange(NR):
-            dR.append(-2 * gamma_hat * R[k])
+            dU = -R[k].U * gamma if compute_du else zeros_like(R[k].U)
+            dV = -R[k].V * gamma if compute_dv else zeros_like(R[k].V)
+            dR.append(RelationParams(dU, dV))
+
         for rel in rels:
-            corr = sigmoid(np.einsum('ij,ik,kj->', # e'_i * R_k * e_j
-                                     e[rel.i], R[rel.k], e[rel.j]))
-            premult = (rel.r - 1) * corr + rel.r * (1 - corr)
-            de[rel.i] += premult * R[rel.k].dot(e[rel.j]) / N
-            de[rel.j] += premult * R[rel.k].T.dot(e[rel.i]) / N
-            dR[rel.k] += premult * e[rel.i].dot(e[rel.j].T) / N
-        # print(de)
-        # print(dR)
+            ei, Uk, Vk, ej = e[rel.i], R[rel.k].U, R[rel.k].V, e[rel.j]
+            scorr = sigmoid(einsum('ij,il,lk,kj->', ei, Uk, Vk, ej))
+            premult = (rel.r - 1) * scorr + rel.r * (1 - scorr)
+            de[rel.i] += premult * einsum('ik,kl,lj->ij', Uk, Vk, ej)
+            de[rel.j] += premult * einsum('ji,kj,kl->il', Vk, Uk, ei)
+            if compute_du:
+                dR[rel.k].U += premult * einsum('ij,kj,lk->il', ei, ej, Vk)
+            if compute_dv:
+                dR[rel.k].V += premult * einsum('ji,jk,lk->il', Uk, ei, ej)
         return LogBilinearParams(de, dR)
 
 
@@ -275,53 +330,83 @@ class TestFeatureDictionary(unittest.TestCase):
 
 class TestLogBilinear(unittest.TestCase):
     def test_init(self):
-        lb = LogBilinear(4, 10, 11, 1)
+        lb = LogBilinear(4, 10, 11, 3, 1)
         self.assertEqual(10, len(lb.params.e))
         self.assertEqual(11, len(lb.params.R))
         self.assertTrue(all(map(lambda e: len(e) == 4, lb.params.e)))
-
+        for (U, V) in lb.params.R:
+            self.assertEqual((4, 3), U.shape)
+            self.assertEqual((3, 4), V.shape)
         print("lb={}".format(lb.eval_one(1,1,1)))
 
     def test_params_to_vec(self):
-        D, NE, NR = 3, 9, 14
-        lb = LogBilinear(D, NE, NR, 1)
+        D, NE, NR, rho = 3, 9, 14, 2
+        lb = LogBilinear(D, NE, NR, rho)
 
-        to_vec = params_to_vec(lb.params)
-        self.assertEqual(lb.params.e[0][0, 0], to_vec[0])
-        self.assertEqual(lb.params.e[0][1, 0], to_vec[1])
-        self.assertEqual(lb.params.e[0][2, 0], to_vec[2])
-        self.assertEqual(lb.params.e[1][0, 0], to_vec[3])
-        self.assertEqual(lb.params.e[1][1, 0], to_vec[4])
-        self.assertEqual(lb.params.R[1][0, 1], to_vec[D*NE + D*D + 1])
+        as_vec = params_to_vec(lb.params)
+        self.assertEqual(lb.params.e[0][0, 0], as_vec[0])
+        self.assertEqual(lb.params.e[0][1, 0], as_vec[1])
+        self.assertEqual(lb.params.e[0][2, 0], as_vec[2])
+        self.assertEqual(lb.params.e[1][0, 0], as_vec[3])
+        self.assertEqual(lb.params.e[1][1, 0], as_vec[4])
+        self.assertEqual(lb.params.R[1].V[0, 1], as_vec[D*NE + 3 * D*rho + 1])
 
-        to_vec_and_back = vec_to_params(D, NE, NR, to_vec)
+        to_vec_and_back = vec_to_params(D, NE, NR, rho, as_vec)
         for i in xrange(NE):
             self.assertEqual(lb.params.e[i].shape, to_vec_and_back.e[i].shape)
             self.assertTrue((lb.params.e[i] == to_vec_and_back.e[i]).all())
         for k in xrange(NR):
-            self.assertEqual(lb.params.R[k].shape, to_vec_and_back.R[k].shape)
-            self.assertTrue((lb.params.R[k] == to_vec_and_back.R[k]).all())
+            self.assertEqual(lb.params.R[k].U.shape, to_vec_and_back.R[k].U.shape)
+            self.assertEqual(lb.params.R[k].V.shape, to_vec_and_back.R[k].V.shape)
+            self.assertTrue((lb.params.R[k].U == to_vec_and_back.R[k].U).all())
+            self.assertTrue((lb.params.R[k].V == to_vec_and_back.R[k].V).all())
 
     def test_check_gradient(self):
-        D, NE, NR = 2, 3, 3
-        lb = LogBilinear(D, NE, NR, 1)
-        rels = [RelationInstance(0, 1, 0, 1)]
+        D, NE, NR, rho = 3, 3, 3, 2
+        gamma = 1
+        lb = LogBilinear(D, NE, NR, rho, 1)
+        rels = [RelationInstance(0, 1, 0, 1)]# , RelationInstance(0, 2, 1, 0)]
 
         def obj(x):
-            params = vec_to_params(D, NE, NR, x)
-            return lb._loglik(params.e, params.R, 1, rels)
+            params = vec_to_params(D, NE, NR, rho, x)
+            return lb._loglik(params.e, params.R, gamma, rels)
 
-        def grad(x):
-            params = vec_to_params(D, NE, NR, x)
-            return params_to_vec(lb._dloglik(params.e, params.R, 1, rels))
+        def grad_both(x):
+            params = vec_to_params(D, NE, NR, rho, x)
+            return params_to_vec(lb._dloglik(params.e, params.R, gamma, rels))
+
+        def grad_dU(x):
+            params = vec_to_params(D, NE, NR, rho, x)
+            return params_to_vec(lb._dloglik(
+                params.e, params.R, gamma, rels, compute_du=True, compute_dv=False))
+
+        def grad_dV(x):
+            params = vec_to_params(D, NE, NR, rho, x)
+            return params_to_vec(lb._dloglik(
+                params.e, params.R, gamma, rels, compute_du=False, compute_dv=True))
 
         x0 = params_to_vec(lb.params)
-        for i in xrange(100):
-            # print("\nnum grad")
-            # print(vec_to_params(D, NE, NR, numerical_grad(obj, x0)))
-            # print("\ngrad")
-            # print(vec_to_params(D, NE, NR, grad(x0)))
-            self.assertLess(check_grad(obj, grad, x0), 1e-6)
+        for i in xrange(1):
+            dnum = vec_to_params(D, NE, NR, rho, numerical_grad(obj, x0))
+            dexact = vec_to_params(D, NE, NR, rho, grad_both(x0))
+            dexact_dU = vec_to_params(D, NE, NR, rho, grad_dU(x0))
+            dexact_dV = vec_to_params(D, NE, NR, rho, grad_dV(x0))
+            # print("\ndnum:\n{}".format(dnum))
+            # print("\ndexact:\n{}".format(dexact))
+            # print("\ndexact_dU:\n{}".format(dexact_dU))
+            # print("\ndexact_dV:\n{}".format(dexact_dV))
+            print(params_to_vec(dnum) / params_to_vec(dexact))
+            self.assertLess(
+                sum((params_to_vec(dnum) - params_to_vec(dexact)) ** 2), 1e-4)
+            for r_num, r_dU, r_dV in zip(dnum.R, dexact_dU.R, dexact_dV.R):
+                self.assertLess(
+                    sum((r_num.U.flatten() - r_dU.U.flatten()) ** 2), 1e-5)
+                self.assertTrue((r_dU.V == 0).all())
+
+                self.assertLess(
+                    sum((r_num.V.flatten() - r_dV.V.flatten()) ** 2), 1e-5)
+                self.assertTrue((r_dV.U == 0).all())
+
             x0 += randn(len(x0)) / 100
 
     def test_split_train_test(self):
@@ -334,8 +419,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Log-Bilinear model for relation extraction.')
     _arg = parser.add_argument
-    _arg('--load', type=str, action='store',
-         metavar='PATH', help='Loads a pickled model from file.')
     _arg('--n-iter', type=int, action='store',
          metavar='NUM', help='Number of NAG iterations to perform.')
     _arg('--train', type=str, action='store',
@@ -344,6 +427,11 @@ if __name__ == '__main__':
          metavar='PATH', help='Load the training set from a CSV file.')
     _arg('--train-out', type=str, action='store',
          metavar='PATH', help='Pickles to training set to a file.')
+    _arg('--save', type=str, action='store',  metavar='PATH',
+         help='Saves the trained model to a file.')
+    _arg('--load', type=str, action='store',  metavar='PATH',
+         help='Loads a model from file (for predictions or further training).')
+
     _arg('--unittest', action='store_true', help='Run unittests')
     args = parser.parse_args()
 
@@ -367,200 +455,24 @@ if __name__ == '__main__':
             sys.exit(1)
         pickle.dump(train_set, open(args.train_out, 'wb'), -1)
 
-    # if args.load:
-    #     model = pickle.load(open(args.load, 'wb'))
-    #     model.fit(train_set.rels, 10)
-    #     pickle.dump(lb, open("model2.pickle", 'wb'), -1)
-
     if train_set:
-        lb = LogBilinear(30, len(train_set.ent_dict._map),
-                         len(train_set.rel_dict._map), .1)
-        fr = lb.fit(train_set, 150)
-        fout = open("valid_eval", 'w')
-
-        rel_decode = train_set.rel_dict.decode
-        ent_decode = train_set.ent_dict.decode
-        for rel in train_set.valid_rels:
-            pred = lb.eval_one(rel.i, rel.j, rel.k)
-            fout.write("{}\t{}\t{}\t{}\t{}\n".format(
-                pred, rel.r, rel_decode(rel.k),
-                ent_decode(rel.i), ent_decode(rel.j)))
-        pickle.dump(lb, open("model.pickle", 'wb'), -1)
+        if args.load:
+            lb = pickle.load(open(args.load, 'rb'))
+        else:
+            lb = LogBilinear(40, len(train_set.ent_dict._map),
+                             len(train_set.rel_dict._map), 5,  .1)
+        fr = lb.fit(train_set, 0.3)
+        # fout = open("valid_eval", 'w')
+        # rel_decode = train_set.rel_dict.decode
+        # ent_decode = train_set.ent_dict.decode
+        # for rel in train_set.valid_rels:
+        #     pred = lb.eval_one(rel.i, rel.j, rel.k)
+        #     fout.write("{}\t{}\t{}\t{}\t{}\n".format(
+        #         pred, rel.r, rel_decode(rel.k),
+        #         ent_decode(rel.i), ent_decode(rel.j)))
+        if args.save:
+            pickle.dump(lb, open(args.save, 'wb'), -1)
 
     if args.unittest:
         unittest.main(verbosity=2, module='logbi', exit=False,
                       argv=[sys.argv[0]])
-
-
-        # def gauss_logZ(L):
-#     assert(L.shape[0] == L.shape[1])
-#     assert(all(np.tril(L_noise) == L_noise))
-#     return -log(det(L)) + D * log(2 * pi) / 2.
-
-# def loglik(X, mu, L):
-#     D, N = X.shape
-#     LtXzero = L.T.dot(X - mu.reshape(D, 1))
-#     l = N * log(det(L)) - D * N * log(2 * pi) / 2.
-#     l -= np.einsum('ij,ji->', LtXzero.T, LtXzero) / 2.
-#     return -l
-
-
-# def loglik_vec(X, theta):
-#     D = X.shape[0]
-#     (mu, L, c) = vec_to_params(theta)
-#     return loglik(X, mu, L)
-
-
-# def params_to_vec(mu, L, c):
-#     assert(mu.size == L.shape[0] == L.shape[1])
-#     D = mu.size
-#     c = np.array([c]) if isinstance(c, np.float) else c
-#     assert(isinstance(c, np.ndarray))
-#     return concatenate((mu, L[np.tril_indices(D)], c))
-
-
-# def vec_to_params(theta):
-#     D = (np.sqrt(8. * theta.size + 1) - 3.) / 2.
-#     assert(int(D) == D)
-#     D = int(D)
-#     assert(theta.size == D + D * (D + 1) / 2 + 1)
-
-#     mu = theta[0:D]
-#     L_elems = theta[D:D + D * (D + 1) / 2]
-#     L = zeros((D, D))
-#     L[np.tril_indices(D)] = L_elems
-#     c = theta[-1]
-#     return GaussParams(mu, L, c)
-
-    # def test_check_grad(self):
-    #     D = 2
-    #     S = c_[[2., .2], [.2, 2.]]
-    #     X = mvn.rvs(randn(2), S, 100).T
-
-    #     mu_noise, P_noise = r_[-1., 1.], .5 * c_[[1., .1], [.1, 1.]]
-    #     L_noise = cholesky(P_noise)
-    #     Y = mvn.rvs(mu_noise, inv(P_noise), 200).T
-
-    #     obj = lambda u: NceGauss.J(
-    #         X, Y, mu_noise, L_noise, *vec_to_params(u))
-    #     grad = lambda u: params_to_vec(
-    #         *NceGauss.dJ(X, Y, mu_noise, L_noise, *vec_to_params(u)))
-    #     grad_diff = lambda u: check_grad(obj, grad, u)
-
-    #     for i in xrange(100):
-    #         u = r_[0,0,2,0,2,1] + randn(6) / 10
-    #         self.assertLess(grad_diff(u), 1e-5)
-
-    # def test_sanity_fit(self):
-    #     mu, P = r_[0., 0.], c_[[2., .2], [.2, 2.]]
-    #     L = cholesky(P)
-    #     Td, k = 100, 2
-    #     X = mvn.rvs(mu, inv(P), Td).T
-    #     theta = GaussParams(zeros(2), eye(2), 1.)
-
-    #     theta_star, Y = self.model.fit_nce(
-    #         X, k, mu_noise=randn(2), L_noise=(rand() + 1) * eye(2),
-    #         mu0=mu, L0=L, maxnumlinesearch=2000, verbose=False)
-    #     noise = self.model.params_noise
-    #     self.assertLess(NceGauss.J(X, Y, noise.mu, noise.L, *theta_star),
-    #                     NceGauss.J(X, Y, noise.mu, noise.L, *theta))
-    #     self.assertLess(np.sum(params_to_vec(
-    #         *NceGauss.dJ(X, Y, noise.mu, noise.L, *theta_star)) ** 2), 1e-6)
-
-
-
-    # def fit_nce(self, X, k=1, mu_noise=None, L_noise=None,
-    #             mu0=None, L0=None, c0=None, method='minimize',
-    #             maxnumlinesearch=None, maxnumfuneval=None, verbose=False):
-    #     _class = self.__class__
-    #     D, Td = X.shape
-    #     self._init_params(D, mu_noise, L_noise, mu0, L0, c0)
-
-    #     noise = self._params_noise
-    #     Y = mvn.rvs(noise.mu, noise.L, k * Td).T
-
-    #     maxnumlinesearch = maxnumlinesearch or DEFAULT_MAXNUMLINESEARCH
-    #     obj = lambda u: _class.J(X, Y, noise.mu, noise.L, *vec_to_params(u))
-    #     grad = lambda u: params_to_vec(
-    #         *_class.dJ(X, Y, noise.mu, noise.L, *vec_to_params(u)))
-
-    #     t0 = params_to_vec(*self._params_nce)
-    #     if method == 'minimize':
-    #         t_star = minimize(t0, obj, grad,
-    #                           maxnumlinesearch=maxnumlinesearch,
-    #                           maxnumfuneval=maxnumfuneval, verbose=verbose)[0]
-    #     else:
-    #         t_star = sp_minimize(obj, t0, method='BFGS', jac=grad,
-    #                              options={'disp': verbose,
-    #                                       'maxiter': maxnumlinesearch}).x
-    #     self._params_nce = GaussParams(*vec_to_params(t_star))
-    #     return (self._params_nce, Y)
-
-    # def fit_ml(self, X):
-    #     D = X.shape[0]
-    #     mu = mean(X, 1)
-    #     L = cholesky(inv(cov(X)))
-    #     c = log(det(L)) - D * log(2 * pi) / 2.
-    #     self._params_ml = GaussParams(mu, L, c)
-
-    # @staticmethod
-    # def _h(U, Uzero, D, k, mu_noise, L_noise, mu, L, c):
-    #     assert(U.shape == Uzero.shape)
-    #     Uzero_noise = U - mu_noise.reshape(D, 1)
-    #     P, P_noise = L.dot(L.T), L_noise.dot(L_noise.T)
-    #     log_pn = log(det(L_noise)) - D * log(2. * pi) / 2.
-    #     log_pn -= np.einsum('ij,jk,ki->i',
-    #                         Uzero_noise.T, P_noise, Uzero_noise) / 2.
-    #     log_pm = -np.einsum('ij,jk,ki->i', Uzero.T, P, Uzero) / 2. + c
-    #     return log_pm - log_pn - log(k)
-
-    # @staticmethod
-    # def J(X, Y, mu_noise, L_noise, mu, L, c):
-    #     """NCE objective function with gaussian data likelihood X and
-    #     gaussian noise Y."""
-    #     assert(mu.size == X.shape[0] == Y.shape[0])
-    #     r = sigmoid
-    #     D, Td = X.shape
-    #     Tn = Y.shape[1]
-    #     k = Tn / Td
-
-    #     Xzero, Yzero = X - mu.reshape(D, 1), Y - mu.reshape(D, 1)
-    #     h = lambda U, Uzero: NceGauss._h(
-    #         U, Uzero, D, k, mu_noise, L_noise, mu, L, c)
-    #     Jm = -np.sum(log(1 + np.exp(-h(X, Xzero))))
-    #     Jn = -np.sum(log(1 + np.exp(h(Y, Yzero))))
-
-    #     print("Jm=%10.4f "
-    #           "max(-h(X, Xzero))=%12.3f " %
-    #           (Jm,  max(-h(X, Xzero))))
-    #     print("Jn=%10.4f "
-    #           "max(-h(Y, Yzero))=%12.3f " %
-    #           (Jn,  max(-h(Y, Yzero))))
-    #     print("mu=%s\n; L=%10.4f\n" % (mu, loglik(X, mu, L)))
-
-    #     return -(Jm + Jn) / Td
-
-    # @staticmethod
-    # def dJ(X, Y, mu_noise, L_noise, mu, L, c):
-    #     """Gradient of the NCE objective function."""
-    #     assert(mu.size == X.shape[0] == Y.shape[0])
-    #     r = sigmoid
-    #     D, Td = X.shape
-    #     Tn = Y.shape[1]
-    #     k = Tn / Td
-    #     P, P_noise = dot(L, L.T), dot(L_noise, L_noise.T)
-
-    #     Xzero, Yzero = X - mu.reshape(D, 1), Y - mu.reshape(D, 1)
-    #     h = lambda U, Uzero: NceGauss._h(
-    #         U, Uzero, D, k, mu_noise, L_noise, mu, L, c)
-    #     rhX, rhY = r(-h(X, Xzero)), r(h(Y, Yzero))
-
-    #     dmu = np.sum(rhX * dot(P, Xzero), 1) - np.sum(rhY * dot(P, Yzero), 1)
-    #     dmu /= Td
-
-    #     dL = -np.einsum('k,ik,jk->ij', rhX, Xzero, L.T.dot(Xzero))
-    #     dL += np.einsum('k,ik,jk->ij', rhY, Yzero, L.T.dot(Yzero))
-    #     dL /= Td
-
-    #     dc = (np.sum(rhX) - np.sum(rhY)) / Td
-    #     return (-dmu, -dL, -array([dc]))

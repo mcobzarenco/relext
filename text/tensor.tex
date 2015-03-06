@@ -16,8 +16,10 @@
 \usepackage{amsthm}
 
 \usepackage[pdftex]{graphicx}
-
 \usepackage{subcaption}
+
+\usepackage{tikz}
+\usetikzlibrary{arrows,shapes,backgrounds,through,shadows,snakes,patterns,mindmap}
 
 \usepackage{fancyhdr}
 \pagestyle{fancy}
@@ -65,6 +67,24 @@ $(i_n, j_n, k_n)$ are distinct and
 \end{align}
 Note that most natural language relations are not symmetric.
 
+\begin{figure}[t]
+\begin{center}
+\begin{tikzpicture}[->]
+\node(ucl) at (0,0) {\texttt{UCL}};
+\node(pearson) at (0,2) {\texttt{Sahani}};
+\node(dayan) at (0,-2) {\texttt{Dayan}};
+\draw(pearson) to [bend right=45] (ucl);
+\node at (-1.5,1) {\texttt{ProfAt}};
+\draw[dotted](pearson) to [bend left=45] (ucl);
+\node at (1.5,1) {\texttt{WorksAt}};
+\draw(dayan) to [bend right=45] (ucl);
+\node at (-1.5,-1) {\texttt{ProfAt}};
+\draw(dayan) to [bend left=45] (ucl);
+\node at (1.5,-1) {\texttt{WorksAt}};
+\end{tikzpicture}
+\end{center}
+\end{figure}
+
 \section{Tensor Decomposition}
 
 \subsection{Log-Bilinear Model}
@@ -89,13 +109,13 @@ the embeddings for entities and relations
 \btheta \equiv \{{\bf e}_i \vert i \in \overline{1..N_E}\} \cup
  \{{\bf U}_k, {\bf V}_k \vert k \in \overline{1..N_R}\}
 \end{align}
-An independent Gaussian prior was placed on the coefficients of the
-embeddings
+An independent Gaussian prior with precision $\gamma$ was placed on
+the coefficients of the embeddings
 \begin{align}
-\forall i \in \overline{1..N_E}.\;\; {\bf e}_i \sim \mathcal{N}({\bf 0},
-\sigma^2); \quad \forall k \in \overline{1..N_R}.\;\; {\bf U}_k[:],
-{\bf V}_k[:] \sim
-\mathcal{N}({\bf 0}, \sigma^2)
+  \forall i \in \overline{1..N_E}.\;\; {\bf e}_i \sim
+  \mathcal{N}\left({\bf 0}, \sigma^2 \equiv \gamma^{-1}\right); \quad
+  \forall k \in \overline{1..N_R}.\;\; {\bf U}_k[:], {\bf V}_k[:] \sim
+  \mathcal{N}\left({\bf 0}, \sigma^2 \equiv \gamma^{-1}\right)
 \end{align}
 Given a dataset assumed assumed to be i.i.d., the posterior
 distribution over $\btheta$ up to the normalisation constant is
@@ -111,10 +131,9 @@ distribution over $\btheta$ up to the normalisation constant is
 &\times \prod_{k=1}^{N_R} (2\pi\sigma^2)^{-D\rho}
     \exp\left(-\frac{\text{Tr}\left({\bf U}_k'{\bf U}_k + {\bf V}_k{\bf V}_k'\right)}{2\sigma^2}\right)
 \end{align}
-We propose fitting this model by finding the maximum a posteriori
-(MAP) estimate $\btheta^* \equiv
-\operatorname{argmax} L(\btheta)$,  with $L(\btheta)
-\equiv \log p(X\vert \btheta)p(\btheta)$
+This model can be fitted by finding the maximum a posteriori (MAP)
+estimate $\btheta^* \equiv \operatorname{argmax} L(\btheta)$, with
+$L(\btheta) \equiv \log p(X\vert \btheta)p(\btheta)$
 \begin{align}
   \label{eqn:loglike}
   L(\btheta) &= \sum_{n=1}^{N}\left[ (1 - r_n) \log \left(1 -
@@ -157,96 +176,83 @@ derivatives w.r.t. $\btheta$ can be computed as
       e}_{i_n}\right)\nonumber \\
   &\qquad - \frac{1}{\sigma^2} {\bf e}_i
 \end{align}
+\noindent One problem with this simple model is that in practice the
+training set would come from a knowledge base which mostly if not
+completely contains positive facts. This results in a highly
+unbalanced dataset where most $r_k = 1$ and the model will just learn
+to output 1. One simple fix is to generate negative examples by
+sampling a random relation and two entities for each positive training
+example. The assumption is that relations are highly sparse and only
+hold for a few combinations of entities.
+\subsection{Bayesian Personalised Ranking}
 
-\section{Bayesian Personalised Ranking}
-% In particular, we are building on \cite{riedel13relation}
+The challenge of learning only from positive feedback is very similar
+to collaborative filtering with implicit feedback. For example, when
+recommending products based only on the shopping history of a
+customer, there's no information in the training set about the
+products that customers do not like. Similarly, a knowledge base only
+contains entity pairs that a relation ``likes''. A principled to
+approach learning only from positive examples is to use a ranking
+objective. Instead of explicitly modelling the probability of a
+relation being true, the new objective would learn an ordering of
+entity pairs for each relation.
+\begin{align}
+  p\left( (e_i, e_j) >_{k} (e_m, e_n) \vert \btheta\right) &\equiv
+  p\left( R_k(e_i, e_j) > R_k(e_m, e_n) \vert \btheta\right) \nonumber \\
+  &= \sigma\left( {\bf e}'_i{\bf R}_k{\bf e}_j -
+    {\bf e}'_m{\bf R}_k{\bf e}_n\right )
+\end{align}
+\noindent The \emph{Bayesian Personalised Ranking} (BPR) objective was first
+proposed for collaborative filtering datasets with implicit feedback
+\cite{rendle2009bpr}. It had been used in the context of relation
+extraction in \cite{riedel13relation} where it ranked the output of a
+matrix factorisation algorithm over entity pairs and relations.
+\noindent Given a training set, the BPR objective enforces that
+observed relations are more likely than the unobserved ones.
+\begin{align}
+  \bar{X} &\equiv \left\{(k,i,j,m,n)\vert R_k(e_i, e_j) \in X \wedge R_k(e_m, e_n) \notin X \right\} \\
+  p(X\vert\btheta) &= \prod_{k=1}^{N_R}p(>_k\vert \btheta) =
+  \prod_{\in\bar{X}} p\left( (e_i, e_j) >_{k} (e_m,
+    e_n)\vert \btheta \right) \\
+  \text{BPR}(\btheta) &\equiv \log \left( p(X\vert\btheta) p(\btheta)
+  \right)
+  \nonumber \\
+  &= \sum_{\in\bar{X}} \log \sigma\left( {\bf e}'_i{\bf R}_k{\bf e}_j
+    - {\bf e}'_m{\bf R}_k{\bf e}_n\right ) + \log p(\btheta) \nonumber
+  \\
+  \label{eqn:bpr_obj}
+  &\propto \sum_{\in\bar{X}} \log \sigma\left( {\bf e}'_i{\bf R}_k{\bf
+      e}_j - {\bf e}'_m{\bf R}_k{\bf e}_n\right ) +
+  \frac{1}{2\sigma^2}\left[ \sum_{i=1}^{N_E} {\bf e}_i'{\bf e}_i
+    +\sum_{k=1}^{N_R} \text{Tr}\left({\bf U}_k'{\bf U}_k + {\bf
+        V}_k{\bf V}_k'\right)\right]
+\end{align}
+The partial derivatives of $\text{BPR}(\btheta)$ with respect to the
+entity and relation embeddings can be computed as
+\begin{align}
+  \label{eqn:bpr_grad}
+  \frac{\partial\text{BPR}}{\partial {\bf U}_l} &= \sum_{\in
+    \bar{X}}\delta_{k,l}\sigma\left( {\bf e}'_i{\bf R}_k{\bf e}_j -
+    {\bf e}'_m{\bf R}_k{\bf e}_n\right ) \left( {\bf e}_{m}{\bf
+      e}'_{n}{\bf V}'_k-{\bf e}_{i}{\bf e}'_{j}{\bf V}'_k\right )
+  - \gamma{\bf U}_l \\
+  \frac{\partial\text{BPR}}{\partial {\bf V}_l} &= \sum_{\in
+    \bar{X}}\delta_{k,l}\sigma\left( {\bf e}'_i{\bf R}_k{\bf e}_j -
+    {\bf e}'_m{\bf R}_k{\bf e}_n\right ) \left( {\bf U}'_k{\bf
+      e}_{m}{\bf e}'_{n} - {\bf U}'_k{\bf e}_{i}{\bf
+      e}'_{j} \right) - \gamma{\bf V}_l \\
+  \frac{\partial \text{BPR}}{\partial {\bf e}_l} &= \sum_{\in
+    \bar{X}}\sigma\left( {\bf e}'_i{\bf R}_k{\bf e}_j - {\bf e}'_m{\bf
+      R}_k{\bf e}_n\right ) \left( {\bf R}_{k}(\delta_{l,m} {\bf
+      e}_{n} - \delta_{l,i}{\bf e}_{j}) + {\bf R}'_{k}(
+    \delta_{l,n} {\bf e}_{m} - \delta_{l,j}{\bf e}_{i})
+  \right) - \gamma {\bf e}_l
+\end{align}
+\noindent We follow \cite{rendle2009bpr} and replace the objective
+above with a stochastic version. We propose optimising the BPR
+objective using Nesterov's Accelerated Gradient (NAG) method.
 
-
-% \section{Background}
-
-% Noise-contrastive estimation (NCE) is a recent approximate point-wise
-% estimation principle for probabilistic models first introduced by
-% Hyv{\"a}rinen et al in \cite{gutmann2010noise}. In particular, the
-% method can be applied to unnormalized probabilistic models, allowing
-% to jointly optimise the normalisation constant and the parameters of
-% the model simultaneously. This is achieved through introducing an
-% alternative to the maximum likelihood estimator (MLE) and analysing
-% its asymptotic properties in large samples. In contrast to ML
-% estimation, the normalisation constant can be treated as any other
-% parameter. The underlying optimisation problem is unconstrained and
-% yields a normalised model. As the contribution of the theory is a new
-% estimator shown to have desirable asymptotic properties under repeated
-% sampling, the analysis of its statistical properties is necessarily
-% frequentist.
-
-% \noindent Let $X = \{ {\bf x}_1, ..., {\bf x}_N \}$ be a sample
-% dataset with ${\bf x}_i \in \mathcal{R}^D, \forall i \in
-% \overline{1..N}$. The data is assumed to come from an unknown sampling
-% distribution $p_d$ and it is modelled by a family of probability
-% distributions $\mathcal{F} \equiv {p_m(\cdot\vert {\boldsymbol
-%     \theta})}$ parameterized by ${\bf \theta}$. Moreover, it is
-% assumed $\mathcal{F}$ is flexible enough: there exists some parameter
-% ${\boldsymbol \theta}^*$ such that $p_d(\cdot) =
-% p_m(\cdot\vert{\boldsymbol \theta^*})$. In this context, the learning
-% problem is finding $\boldsymbol \theta^*$ given the training dataset
-% $X$.
-
-% \noindent The theory of noise-contrastive estimation is motivated by
-% characterising the properties of $X$ in relation to a generated
-% reference \emph{noise} dataset $Y$ with known distribution $p_n$. The
-% probability densities of the noise and the training data are related
-% by the ratio $p_d/p_n$. The comparison between the two datasets is
-% achieved by training a logistic regression classifier to discriminate
-% between noise and the dataset $X$. Assume $M$ noise samples are
-% generated, such that $Y = \{ {\bf y}_1, ..., {\bf y}_M \}$ and let $Z
-% \equiv X \cup Y = \{ {\bf z}_1, ..., {\bf z}_{N + M} \}$. For each
-% datapoint ${\bf z}_i$, we assign a class label $c_i = 1$ iff ${\bf
-%   z}_i \in X$ and $c_i = 0$ iff ${\bf z}_i \in Y$. As the sampling
-% distribution $p_d$ is unknown, $p({\bf z}\vert c=1)$ is taken to be
-% $p_m({\bf z}\vert {\boldsymbol \theta})$ and thus:
-% \begin{align*}
-%   p({\bf z} \vert c = 0, {\boldsymbol \theta}) &= p_n({\bf z})
-%   &p(c = 0) = \frac{M}{M + N}\\
-%   p({\bf z} \vert c = 1, {\boldsymbol \theta}) &= p_m({\bf z}\vert
-%   {\boldsymbol \theta})
-%   &p(c = 1) = \frac{N}{M + N}
-% \end{align*}
-% \noindent Using Bayes theorem and letting $\sigma(x) \equiv 1 / (1 +
-% \exp(-x))$ denote the logistic function, the posterior class
-% probability for a noise sample can be written as
-% \begin{align}
-%   p(c = 0 \vert {\bf z}, {\boldsymbol \theta}) &= \frac{p( {\bf z}
-%     \vert c = 0, {\boldsymbol \theta})p(c = 0)} {p( {\bf z} \vert c =
-%     0, {\boldsymbol \theta})p(c = 0) + p( {\bf z}
-%     \vert c = 1, {\boldsymbol \theta})p(c = 1)} \notag \\
-%   &= \frac{Mp_n({\bf z})}{Mp_n({\bf z}) + Np_m({\bf z}\vert
-%     {\boldsymbol \theta})} = \frac{\alpha p_n({\bf z})}{\alpha
-%     p_n({\bf z})
-%     + p_m({\bf z}\vert {\boldsymbol \theta})} \notag \\
-%   &= 1 - \sigma\left(\log \frac{p_m({\bf z}\vert {\boldsymbol
-%         \theta})}{\alpha p_n({\bf z})} \right)
-% \end{align}
-% Where $\alpha \equiv M / N$ is the ratio between the number of noise
-% samples and the number of training datapoints. In the last line above
-% the relation $\sigma(-x) = 1 - \sigma(x)$ was used. Similarly, the
-% posterior class probability for a training datapoint is
-% \begin{align}
-%   p(c = 1 \vert {\bf z}, {\boldsymbol \theta}) = \frac{p_m({\bf
-%       z}\vert {\boldsymbol \theta})}{\alpha p_n({\bf z}) + p_m({\bf
-%       z}\vert {\boldsymbol \theta})} = \sigma\left(\log \frac{p_m({\bf
-%         z}\vert {\boldsymbol \theta})}{\alpha p_n({\bf z})} \right)
-% \end{align}
-% \noindent The quantities can be written more succinctly by introducing
-% a function $h$
-% \begin{align}
-%   h({\bf z}, \alpha, {\boldsymbol \theta}) \equiv \sigma\left(\log
-%     \frac{p_m({\bf z}\vert {\boldsymbol \theta})}{\alpha p_n({\bf z})}
-%   \right)
-% \end{align}
-% \noindent such that
-% \begin{align}
-% &p(c = 0 \vert {\bf z}, {\boldsymbol \theta}) = 1 - h({\bf z}, \alpha, {\boldsymbol \theta})
-% &p(c = 1 \vert {\bf z}, {\boldsymbol \theta}) = h({\bf z}, \alpha, {\boldsymbol \theta})
-% \end{align}
+\bibliographystyle{plain}
+\bibliography{refs/refs.bib}
 
 \end{document}

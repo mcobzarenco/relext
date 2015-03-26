@@ -5,7 +5,7 @@ import cPickle as pickle
 import sys
 import time
 import unittest
-from collections import namedtuple
+from collections import defaultdict, namedtuple
 from itertools import count, cycle, islice, izip
 from random import randint, shuffle
 
@@ -16,7 +16,7 @@ from numpy import array, concatenate, dot, eye, inf, isnan, log, log1p, outer, \
 from numpy.random import rand, randn
 from numpy.linalg import cholesky, det, inv
 from scipy import optimize
-from scipy.optimize import check_grad, minimize
+from scipy.optimize import check_grad, minimizee
 
 
 DEFAULT_MAXNUMLINESEARCH = 150
@@ -26,6 +26,7 @@ sigmoid = lambda u: 1.0 / (1.0 + exp(-u))
 # sigmoid = lambda u: (1.0 + u / np.sqrt(1 + u * u)) / 2
 
 LogBilinearParams = namedtuple('LogBilinearParams', ['e', 'R'])
+SparseGradient = namedtuple('SparseGradient', ['de', 'dR'])
 
 # Codes the assertion R_k(e_i, e_j) = r
 RelationInstance = namedtuple('RelationInstance', ['i', 'j', 'k', 'r']);
@@ -461,28 +462,57 @@ class BprBilinear(object):
         print("Number of model parameters: {}".format(len(theta)))
 
         theta_update = zeros(len(theta))
-        alpha, mu = .03, 0.6
-        N_ITER = 3
-        batch_size = 1000
+        alpha, mu = .1, 0.8
+        N_ITER = 30
+        batch_size = 3000
         train_rels = dataset.train_rels
         shuffle(train_rels)
         batches = cycle(train_rels)
         neg_rel = lambda k : RelationInstance(randint(0, NE - 1), randint(0, NE - 1), k, 0)
+        # for i in xrange(N_ITER):
+        #     batch = map(lambda x: (x, neg_rel(x.k)), islice(batches, batch_size))
+        #     print("Loaded batch {} ({})".format(i, len(batch)))
+        #     for j in [0, 1]:
+        #         start = time.clock()
+        #         probe = theta + theta_update
+        #         theta_update = mu * theta_update - alpha * grad(batch, probe, True, False)
+        #         theta += theta_update
+        #         print("Update took {} seconds".format(time.clock() - start))
+
+        #         start = time.clock()
+        #         probe = theta + theta_update
+        #         theta_update = mu * theta_update - alpha * grad(batch, probe, False, True)
+        #         theta += theta_update
+        #         print("Update took {} seconds".format(time.clock() - start))
+
+        def apply_sparse_grad(alpha, p, sg):
+            for i, ent in sg.de.iteritems():
+                p.e[i] += alpha * ent
+            for k, rel in sg.dR.iteritems():
+                p.R[k].U += alpha * rel.U
+                p.R[k].V += alpha * rel.V
+
         for i in xrange(N_ITER):
             batch = map(lambda x: (x, neg_rel(x.k)), islice(batches, batch_size))
             print("Loaded batch {} ({})".format(i, len(batch)))
-            for j in [0, 1]:
-                start = time.clock()
-                probe = theta + theta_update
-                theta_update = mu * theta_update - alpha * grad(batch, probe, True, False)
-                theta += theta_update
-                print("Update took {} seconds".format(time.clock() - start))
+            start = time.clock()
+            sgrad = cls._dobj_sparse(
+                self.params.e, self.params.R, gamma, batch, True, True)
+            apply_sparse_grad(alpha, self.params, sgrad)
 
-                start = time.clock()
-                probe = theta + theta_update
-                theta_update = mu * theta_update - alpha * grad(batch, probe, False, True)
-                theta += theta_update
-                print("Update took {} seconds".format(time.clock() - start))
+            # sgrad = cls._dobj_sparse(
+            #     self.params.e, self.params.R, gamma, batch, False, True)
+            # apply_sparse_grad(alpha, self.params, sgrad)
+
+            # train_obj = -cls._obj(self.params.e, self.params.R, gamma, batch)
+            # print("Objective: {}".format(train_obj))
+
+            print("Update took {} seconds".format(time.clock() - start))
+
+            train_obj = -cls._obj(self.params.e, self.params.R, gamma, batch)
+            print("Objective: {}".format(train_obj))
+
+
 
         # for i in xrange(N_ITER):
         #     batch = map(lambda x: (x, neg_rel(x.k)), islice(batches, batch_size))
@@ -552,18 +582,12 @@ class BprBilinear(object):
         return bpr_obj
 
     @staticmethod
-    def _dobj(e, R, gamma, rel_pairs,
-              compute_du=True, compute_dv=True):
-        D, NE, NR = e[0].shape[0], len(e), len(R)
-        N = len(rel_pairs)
-        de, dR = [], []
-        for i in xrange(NE):
-            de.append(-e[i] * gamma)
-        for k in xrange(NR):
-            dU = -R[k].U * gamma if compute_du else zeros_like(R[k].U)
-            dV = -R[k].V * gamma if compute_dv else zeros_like(R[k].V)
-            dR.append(RelationParams(dU, dV))
-
+    def _dobj_sparse(e, R, gamma, rel_pairs,
+                     compute_du=True, compute_dv=True):
+        D, rho = R[0].U.shape
+        NE, NR, N = len(e), len(R), len(rel_pairs)
+        de = defaultdict(lambda: zeros((D, 1)))
+        dR = defaultdict(lambda: RelationParams(zeros((D, rho)), zeros((rho, D))))
         for pos_rel, neg_rel in rel_pairs:
             pos_ei, pos_ej = e[pos_rel.i], e[pos_rel.j]
             pos_Uk, pos_Vk = R[pos_rel.k]
@@ -582,6 +606,39 @@ class BprBilinear(object):
             if compute_dv:
                 dR[pos_rel.k].V -= premult * einsum('ji,jk,lk->il', pos_Uk, pos_ei, pos_ej)
                 dR[pos_rel.k].V += premult * einsum('ji,jk,lk->il', neg_Uk, neg_ei, neg_ej)
+
+        for i, ent  in de.iteritems():
+            ent -= e[i] * gamma
+        if compute_du and compute_dv:
+            for k, rel in dR.iteritems():
+                rel.U -= gamma * R[k].U
+                rel.V -= gamma * R[k].V
+        elif compute_du:
+            for k, rel in dR.iteritems():
+                rel.U -= gamma * R[k].U
+        elif compute_dv:
+            for k, rel in dR.iteritems():
+                rel.V -= gamma * R[k].V
+        return SparseGradient(de, dR)
+
+    @staticmethod
+    def _dobj(e, R, gamma, rel_pairs,
+              compute_du=True, compute_dv=True):
+        NE, NR = len(e), len(R)
+        de, dR = [], []
+        for i in xrange(NE):
+            de.append(-e[i] * gamma)
+        for k in xrange(NR):
+            dU = -R[k].U * gamma if compute_du else zeros_like(R[k].U)
+            dV = -R[k].V * gamma if compute_dv else zeros_like(R[k].V)
+            dR.append(RelationParams(dU, dV))
+        sparse_grad = BprBilinear._dobj_sparse(
+            e, R, gamma, rel_pairs, compute_du, compute_dv)
+        print("sparse_grad={}".format(sparse_grad))
+        for i, ent in sparse_grad.de.iteritems():
+            de[i] = ent
+        for k, rel in sparse_grad.dR.iteritems():
+            dR[k] = rel
         return LogBilinearParams(de, dR)
 
 
@@ -690,12 +747,12 @@ if __name__ == '__main__':
         pickle.dump(train_set, open(args.train_out, 'wb'), -1)
 
     if train_set:
-        gamma = 1e-6
+        gamma = 1e-5
         if args.load:
             lb = pickle.load(open(args.load, 'rb'))
         else:
-            lb = BprBilinear(30, len(train_set.ent_dict._map),
-                             len(train_set.rel_dict._map), 5, .3)
+            lb = BprBilinear(50, len(train_set.ent_dict._map),
+                             len(train_set.rel_dict._map), 10, .3)
         fr = lb.fit(train_set, gamma)
         # fout = open("valid_eval", 'w')
         # rel_decode = train_set.rel_dict.decode
